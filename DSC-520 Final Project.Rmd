@@ -1,0 +1,699 @@
+---
+title: "DSC 520 Statistics for Data Science Final Project - Florida Traffic Stops"
+author: "Ambrose M Malagon Cordero"
+date: "August 8, 2018"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rmarkdown)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(aod)
+library(caTools)
+library(car)
+library(pROC)
+library(knitr)
+library(pander)
+library(e1071)
+library(caret)
+```
+
+## Introduction 
+
+"What are the odds that you're going to get pulled over by the police every time you get in the car?" - This question came about when a group coworkers and I witnessed another coworker (whom shall be referred to as "the driver") get pulled over at our work location's parking area. "Driver" stated that the Police officer tailed them all the way to work just to give a speeding ticket, remarked that "it was completely uncalled for"" and that they would fight the citation at court - which they lost. according to Police Report, "Driver"" was going 70 mph in area where the speed limit was 45 mph. 
+
+This incident was just one occurence of over 50,000 traffic stops that were potentially done by the United States Police on that given day (according to the Stanford Open Policing Project). It would be naive to assume that all of the 50,000 interactions which occured on that day were exactly the same as "Driver"'s. However, such a high number of traffic stops has made me wonder: why are so many people getting stopped on any given day? 
+
+## Problem Statement
+
+As stated before, Driver went to court in an attempt to get the citation dropped but lost. The judge upheld the citation based on the information captured by the Police officer on that day. Driver believed that the data that was collected was not a true representation of the events - while these weren't Driver's exact words, the point that data captured by the Police Officer established the narrative (Driver was speeding and thus got a citation) serves as the trigger for the following questions:
+
+* How many traffic stops occurred in the state of Florida at any given point?
+* What is/are the most common type of traffic violations that occur within the state of Florida?
+* What do the demographics for those drivers that get pulled over look like?
+* Do we have enough information to create a model that will predict what type of outcome of the traffic stop?
+* Can we use machine learning to classify the types of traffic stop citations?
+
+## Methodology
+
+For this study, I will be using the Stanford Open Policing Project – Florida data set, posted in Kaggle by the Stanford Open Policing Project (https://www.kaggle.com/stanford-openpolicing/stanford-open-policing-project-florida).
+
+Libraries used for this initial data exploration:
+
+* rmarkdown
+* tidyr
+* reshape2
+* scales
+* stringr
+* lubridate
+* dplyr
+* ggplot2
+* aod
+* caTools
+* pROC
+* knitr
+* pander
+* e1071
+* caret
+
+**Importing the Data Set into R and preliminary cleaning:**
+
+```{r message = FALSE, warning = FALSE}
+stop.data <- read.csv("FL.csv")
+
+dim(stop.data)
+
+```
+
+By using the _dim_ function, we note that the dataframe contains a total of 28 variables with 5,421,446 observations. 
+
+```{r message = FALSE, warning = FALSE}
+head(stop.data)
+```
+
+Looking at the first 6 rows of our data frame, we notice that several observations have a hard coded _NA_ value or have been left blank, which leads me to believe that these are being handled as two different value types:
+
+``` {r message=FALSE, warning = FALSE}
+as.data.frame(colSums(stop.data ==""))
+
+as.data.frame(colSums(is.na(stop.data)))
+```
+
+By using the the _mutate_ function, we can turn all of the blank values into NA's:
+
+``` {r message = FALSE, warning = FALSE}
+stop.dataR2 <- stop.data %>% mutate_all(na_if,"")
+```
+
+We inspect this new dataframe to ensure that all *blank* values have been succesfully converted to *NA*:
+
+``` {r message = FALSE}
+as.data.frame(colSums(stop.dataR2 ==""))
+
+as.data.frame(colSums(is.na(stop.dataR2)))
+```
+
+**Selecting a sample size:**
+
+We can use the following formula to determine an appropriate sample size:
+
+Necessary Sample Size = (Z-score)2 * StdDev *(1-StdDev) / (margin of error)
+
+Below are the z-scores for the most common confidence levels:
+
+* 90% – Z Score = 1.645
+* 95% – Z Score = 1.96
+* 99% – Z Score = 2.576
+
+Because of the large sample size, I want to look at the 99% confidence interval with a 1% margin of error. In order to do this calculation, I used the following function (source: http://news.mrdwab.com/post/sample-size-calculator/):
+
+``` {r message = FALSE, warning = FALSE}
+sample.size.table = function(margin=.5, c.interval=.05, population) {
+  z.val=c(1.281551565545, 1.644853626951, 1.959963984540,
+          2.326347874041, 2.575829303549, 2.807033768344,
+          3.090232306168, 3.290526731492, 3.890591886413)
+  ss = (z.val^2 * margin * (1-margin))/(c.interval^2)
+  p.ss = ss/(1 + ((ss-1)/population))
+  c.level = c("80%","90%","95%","98%","99%",
+              "99.5%","99.8%","99.9%","99.99%")
+  results = data.frame(c.level, round(p.ss, digits = 0))
+  names(results) = c("Confidence Level", "Sample Size")
+  METHOD = c("Suggested sample sizes at different confidence levels")
+  moe = paste((c.interval*100), "%", sep="")
+  resp.dist = paste((margin*100),"%", sep="")
+  pre = structure(list(Population=population,
+                       "Margin of error" = moe,
+                       "Response distribution" = resp.dist,
+                       method = METHOD),
+                  class = "power.htest")
+  print(pre)
+  print(results)
+}
+
+sample.size.table(0.5, 0.01, 5421446)
+```
+
+This provides our final sample size: 16,537 observations. Now we select the observations from our data set:
+
+``` {r message = FALSE}
+stop.dataR3 <- stop.dataR2[sample(nrow(stop.dataR2),16537),]
+
+dim(stop.dataR3)
+```
+
+*Notice* - I am not excluding any NA values with the sample selection. Doing so would potentially skew the results the analysis. Rather than omitting these, we can use data transformation to provide more context to our results by asking the following questions:
+
+* Which variables are more likely to be ommited during an interaction?
+* What type of outcomes have more variables ommitted?
+
+The following table will assist us with assessing the situation:
+
+``` {r message = FALSE, warning = FALSE}
+na.data <- as.data.frame(colSums(is.na(stop.dataR3)))
+na.data
+```
+\
+\
+* Variables greater *NA* 5,000 observations - Exclude these variables from the final data set.
+* Variables with 10 or less *NA* observations - Leave these observations in the data set, with the understanding that they could be removed if they ultimately prove to be influencing outliers.
+* Variables with less than 5,000 but greater than 10 *NA* observations - Create new variables to account if they were captured during the interaction or not.
+
+``` {r message = FALSE}
+driver_gender_captured <- ifelse(is.na(stop.dataR3$driver_gender), "FALSE", "TRUE")
+driver_age_raw_captured <- ifelse(is.na(stop.dataR3$driver_age_raw), "FALSE", "TRUE")
+driver_age_captured <- ifelse(is.na(stop.dataR3$driver_age), "FALSE", "TRUE")
+driver_age_raw_captured <- ifelse(is.na(stop.dataR3$driver_age_raw), "FALSE", "TRUE")
+driver_race_raw_captured <- ifelse(is.na(stop.dataR3$driver_race_raw), "FALSE", "TRUE")
+driver_race_captured <- ifelse(is.na(stop.dataR3$driver_race), "FALSE", "TRUE")
+driver_violation_raw_captured <- ifelse(is.na(stop.dataR3$violation_raw), "FALSE", "TRUE")
+driver_violation_captured <- ifelse(is.na(stop.dataR3$violation), "FALSE", "TRUE")
+stop_outcome_captured <- ifelse(is.na(stop.dataR3$stop_outcome), "FALSE", "TRUE")
+is_arrested_captured <- ifelse(is.na(stop.dataR3$is_arrested), "FALSE", "TRUE")
+officer_gender_captured <- ifelse(is.na(stop.dataR3$officer_gender), "FALSE", "TRUE")
+officer_age_captured <- ifelse(is.na(stop.dataR3$officer_age), "FALSE", "TRUE")
+officer_race_captured <- ifelse(is.na(stop.dataR3$officer_race), "FALSE", "TRUE")
+officer_rank_captured <- ifelse(is.na(stop.dataR3$officer_rank), "FALSE", "TRUE")
+out_of_state_captured <- ifelse(is.na(stop.dataR3$out_of_state), "FALSE", "TRUE")
+```
+
+**Data Transformation**
+
+Starting with the *Officer Rank*, we need to strip down the various permutations (spelling typos and different naming conventions) for these:
+
+``` {r message = FALSE}
+officer_rank_stream <- str_remove(stop.dataR3$officer_rank, "[./]")
+
+officer_rank_stream[officer_rank_stream == 'CORP'| officer_rank_stream == 'CORPORL'|officer_rank_stream =='CPL'] <- 'CORPORAL'
+officer_rank_stream[officer_rank_stream == 'CAPT'| officer_rank_stream == 'CPT'] <- 'CAPTAIN'
+officer_rank_stream[officer_rank_stream == 'LT'] <- 'LIEUTENANT'
+officer_rank_stream[officer_rank_stream == 'MSR TRP'|
+                      officer_rank_stream == 'MST TRP.'|
+                      officer_rank_stream == 'MSTPR'|
+                      officer_rank_stream == 'MSTR'|
+                      officer_rank_stream == 'MSTR TPR'|
+                      officer_rank_stream == 'MSTR TPR.'|
+                      officer_rank_stream == 'MSTR/TPR.'|
+                      officer_rank_stream == 'MSR TRP'|
+                      officer_rank_stream == 'MSTRTPR.'|
+                      officer_rank_stream == 'MTPR'|
+                      officer_rank_stream == 'MTPR.'|
+                      officer_rank_stream == 'MTRP'|
+                      officer_rank_stream == 'MTROOPER'] <- 'MASTER TPR'
+officer_rank_stream[officer_rank_stream == 'MCPL' | officer_rank_stream == 'MST CPL' ] <- 'MASTER CPL'
+officer_rank_stream[officer_rank_stream == 'SR TPR.' |
+                      officer_rank_stream == 'SRTPR.' |
+                      officer_rank_stream == 'STPR.'] <- 'SR TRP'
+officer_rank_stream[officer_rank_stream == 'TRP' |
+                      officer_rank_stream == 'TRR' |
+                      officer_rank_stream == 'TPR'] <- 'TROOPER'
+officer_rank_stream[officer_rank_stream == 'SGT'] <- 'SERGEANT'
+officer_rank_stream[officer_rank_stream == 'SSERGEANT'] <- 'STAFF SERG'
+
+pander(table(officer_rank_stream))
+```
+
+Up next: the *violation* variable. 
+
+```{r message = FALSE, warning = FALSE}
+violation_rawsl <- as.character(stop.dataR3$violation)
+
+violation_rawsl[ violation_rawsl == 'DUI,Equipment' |
+                   violation_rawsl == 'DUI,Equipment,License' |
+                   violation_rawsl == 'DUI,Equipment,License,Registration/plates,Truck' |
+                   violation_rawsl == 'DUI,Equipment,Other' |
+                   violation_rawsl == 'DUI,Equipment,Safe movement' |
+                   violation_rawsl == 'DUI,Equipment,Truck' |
+                   violation_rawsl == 'DUI,License' |
+                   violation_rawsl == 'DUI,License,Safe movement' |
+                   violation_rawsl == 'DUI,License,Seat belt' |
+                   violation_rawsl == 'DUI,License,Speeding' |
+                   violation_rawsl == 'DUI,Lights' |
+                   violation_rawsl == 'DUI,Other' |
+                   violation_rawsl == 'DUI,Other (non-mapped)' |
+                   violation_rawsl == 'DUI,Other,Speeding' |
+                   violation_rawsl == 'DUI,Safe movement' |
+                   violation_rawsl == 'DUI,Safe movement,Seat belt' |
+                   violation_rawsl == 'DUI,Safe movement,Speeding' |
+                   violation_rawsl == 'DUI,Seat belt' |
+                   violation_rawsl == 'DUI,Seat belt,Speeding' |
+                   violation_rawsl == 'DUI,Speeding'] <- 'DUI'
+
+violation_rawsl[  violation_rawsl == 'Equipment,License' |
+                    violation_rawsl == 'Equipment,License,Other' |
+                    violation_rawsl == 'Equipment,License,Other (non-mapped)' |
+                    violation_rawsl == 'Equipment,License,Other,Paperwork' |
+                    violation_rawsl == 'Equipment,License,Other,Paperwork,Seat belt' |
+                    violation_rawsl == 'Equipment,License,Paperwork' |
+                    violation_rawsl == 'Equipment,License,Paperwork,Safe movement' |
+                    violation_rawsl == 'Equipment,License,Paperwork,Safe movement,Seat belt' |
+                    violation_rawsl == 'Equipment,License,Registration/plates' |
+                    violation_rawsl == 'Equipment,License,Safe movement' |
+                    violation_rawsl == 'Equipment,License,Seat belt' |
+                    violation_rawsl == 'Equipment,License,Seat belt,Speeding' |
+                    violation_rawsl == 'Equipment,License,Speeding' |
+                    violation_rawsl == 'Equipment,License,Truck' |
+                    violation_rawsl == 'Equipment,Lights' |
+                    violation_rawsl == 'Equipment,Lights,Speeding' |
+                    violation_rawsl == 'Equipment,Other' |
+                    violation_rawsl == 'Equipment,Other (non-mapped)' |
+                    violation_rawsl == 'Equipment,Other,Paperwork' |
+                    violation_rawsl == 'Equipment,Other,Paperwork,Speeding' |
+                    violation_rawsl == 'Equipment,Other,Paperwork,Speeding,Truck' |
+                    violation_rawsl == 'Equipment,Other,Registration/plates' |
+                    violation_rawsl == 'Equipment,Other,Safe movement' |
+                    violation_rawsl == 'Equipment,Other,Seat belt' |
+                    violation_rawsl == 'Equipment,Other,Speeding' |
+                    violation_rawsl == 'Equipment,Other,Truck' |
+                    violation_rawsl == 'Equipment,Paperwork' |
+                    violation_rawsl == 'Equipment,Paperwork,Registration/plates' |
+                    violation_rawsl == 'Equipment,Paperwork,Registration/plates,Speeding' |
+                    violation_rawsl == 'Equipment,Paperwork,Registration/plates,Truck' |
+                    violation_rawsl == 'Equipment,Paperwork,Safe movement' |
+                    violation_rawsl == 'Equipment,Paperwork,Seat belt' |
+                    violation_rawsl == 'Equipment,Paperwork,Seat belt,Truck' |
+                    violation_rawsl == 'Equipment,Paperwork,Speeding' |
+                    violation_rawsl == 'Equipment,Paperwork,Speeding,Truck' |
+                    violation_rawsl == 'Equipment,Paperwork,Truck' |
+                    violation_rawsl == 'Equipment,Registration/plates' |
+                    violation_rawsl == 'Equipment,Registration/plates,Safe movement' |
+                    violation_rawsl == 'Equipment,Registration/plates,Seat belt' |
+                    violation_rawsl == 'Equipment,Registration/plates,Speeding' |
+                    violation_rawsl == 'Equipment,Registration/plates,Truck' |
+                    violation_rawsl == 'Equipment,Safe movement' |
+                    violation_rawsl == 'Equipment,Safe movement,Seat belt' |
+                    violation_rawsl == 'Equipment,Safe movement,Speeding' |
+                    violation_rawsl == 'Equipment,Safe movement,Truck' |
+                    violation_rawsl == 'Equipment,Seat belt' |
+                    violation_rawsl == 'Equipment,Seat belt,Speeding' |
+                    violation_rawsl == 'Equipment,Seat belt,Truck' |
+                    violation_rawsl == 'Equipment,Speeding' |
+                    violation_rawsl == 'Equipment,Speeding,Truck' |
+                    violation_rawsl == 'Equipment,Truck' ] <- 'Equipment'
+
+violation_rawsl[  violation_rawsl == 'License' |
+                    violation_rawsl == 'License,Lights' |
+                    violation_rawsl == 'License,Lights,Other' |
+                    violation_rawsl == 'License,Lights,Paperwork' |
+                    violation_rawsl == 'License,Lights,Registration/plates' |
+                    violation_rawsl == 'License,Lights,Safe movement,Truck' |
+                    violation_rawsl == 'License,Lights,Seat belt' |
+                    violation_rawsl == 'License,Lights,Speeding' |
+                    violation_rawsl == 'License,Other' |
+                    violation_rawsl == 'License,Other (non-mapped),Registration/plates' |
+                    violation_rawsl == 'License,Other (non-mapped),Speeding' |
+                    violation_rawsl == 'License,Other,Paperwork' |
+                    violation_rawsl == 'License,Other,Registration/plates' |
+                    violation_rawsl == 'License,Other,Registration/plates,Safe movement' |
+                    violation_rawsl == 'License,Other,Safe movement' |
+                    violation_rawsl == 'License,Other,Safe movement,Truck' |
+                    violation_rawsl == 'License,Other,Seat belt' |
+                    violation_rawsl == 'License,Other,Speeding' |
+                    violation_rawsl == 'License,Other,Truck' |
+                    violation_rawsl == 'License,Paperwork' |
+                    violation_rawsl == 'License,Paperwork,Registration/plates' |
+                    violation_rawsl == 'License,Paperwork,Registration/plates,Safe movement' |
+                    violation_rawsl == 'License,Paperwork,Registration/plates,Seat belt' |
+                    violation_rawsl == 'License,Paperwork,Registration/plates,Speeding' |
+                    violation_rawsl == 'License,Paperwork,Safe movement' |
+                    violation_rawsl == 'License,Paperwork,Safe movement,Seat belt' |
+                    violation_rawsl == 'License,Paperwork,Seat belt' |
+                    violation_rawsl == 'License,Paperwork,Speeding' |
+                    violation_rawsl == 'License,Paperwork,Truck' |
+                    violation_rawsl == 'License,Registration/plates' |
+                    violation_rawsl == 'License,Registration/plates,Safe movement' |
+                    violation_rawsl == 'License,Registration/plates,Seat belt' |
+                    violation_rawsl == 'License,Registration/plates,Speeding' |
+                    violation_rawsl == 'License,Registration/plates,Truck' |
+                    violation_rawsl == 'License,Safe movement' |
+                    violation_rawsl == 'License,Safe movement,Seat belt' |
+                    violation_rawsl == 'License,Safe movement,Speeding' |
+                    violation_rawsl == 'License,Safe movement,Truck' |
+                    violation_rawsl == 'License,Seat belt' |
+                    violation_rawsl == 'License,Seat belt,Speeding' |
+                    violation_rawsl == 'License,Seat belt,Truck' |
+                    violation_rawsl == 'License,Speeding' |
+                    violation_rawsl == 'License,Speeding,Truck' |
+                    violation_rawsl == 'License,Truck' ] <- 'License'
+
+violation_rawsl[  violation_rawsl == 'Lights' |
+                    violation_rawsl == 'Lights,Other' |
+                    violation_rawsl == 'Lights,Paperwork' |
+                    violation_rawsl == 'Lights,Paperwork,Registration/plates' |
+                    violation_rawsl == 'Lights,Paperwork,Truck' |
+                    violation_rawsl == 'Lights,Registration/plates' |
+                    violation_rawsl == 'Lights,Safe movement' |
+                    violation_rawsl == 'Lights,Seat belt' |
+                    violation_rawsl == 'Lights,Speeding' ] <- 'Lights'
+
+violation_rawsl[  violation_rawsl == 'Other' |
+                    violation_rawsl == 'Other (non-mapped)' |
+                    violation_rawsl == 'Other (non-mapped),Seat belt' |
+                    violation_rawsl == 'Other (non-mapped),Speeding' |
+                    violation_rawsl == 'Other,Other (non-mapped)' |
+                    violation_rawsl == 'Other,Paperwork' |
+                    violation_rawsl == 'Other,Paperwork,Registration/plates' |
+                    violation_rawsl == 'Other,Paperwork,Registration/plates,Seat belt' |
+                    violation_rawsl == 'Other,Paperwork,Registration/plates,Speeding' |
+                    violation_rawsl == 'Other,Paperwork,Safe movement' |
+                    violation_rawsl == 'Other,Paperwork,Seat belt' |
+                    violation_rawsl == 'Other,Paperwork,Speeding' |
+                    violation_rawsl == 'Other,Paperwork,Truck' |
+                    violation_rawsl == 'Other,Registration/plates' |
+                    violation_rawsl == 'Other,Registration/plates,Safe movement' |
+                    violation_rawsl == 'Other,Registration/plates,Seat belt' |
+                    violation_rawsl == 'Other,Registration/plates,Speeding' |
+                    violation_rawsl == 'Other,Registration/plates,Truck' |
+                    violation_rawsl == 'Other,Safe movement' |
+                    violation_rawsl == 'Other,Safe movement,Seat belt' |
+                    violation_rawsl == 'Other,Safe movement,Speeding' |
+                    violation_rawsl == 'Other,Safe movement,Truck' |
+                    violation_rawsl == 'Other,Seat belt' |
+                    violation_rawsl == 'Other,Seat belt,Speeding' |
+                    violation_rawsl == 'Other,Seat belt,Truck' |
+                    violation_rawsl == 'Other,Speeding' |
+                    violation_rawsl == 'Other,Speeding,Truck' |
+                    violation_rawsl == 'Other,Truck' ] <- 'Other'
+
+
+violation_rawsl[   violation_rawsl == 'Registration/plates' |
+                     violation_rawsl == 'Registration/plates,Safe movement' |
+                     violation_rawsl == 'Registration/plates,Safe movement,Seat belt' |
+                     violation_rawsl == 'Registration/plates,Safe movement,Speeding' |
+                     violation_rawsl == 'Registration/plates,Safe movement,Truck' |
+                     violation_rawsl == 'Registration/plates,Seat belt' |
+                     violation_rawsl == 'Registration/plates,Seat belt,Speeding' |
+                     violation_rawsl == 'Registration/plates,Seat belt,Truck' |
+                     violation_rawsl == 'Registration/plates,Speeding' |
+                     violation_rawsl == 'Registration/plates,Speeding,Truck' |
+                     violation_rawsl == 'Registration/plates,Truck'  ] <- 'Registration'
+
+violation_rawsl[   violation_rawsl == 'Paperwork,Registration/plates' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Safe movement' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Safe movement,Speeding' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Seat belt' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Seat belt,Speeding' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Speeding' |
+                     violation_rawsl == 'Paperwork,Registration/plates,Truck' |
+                     violation_rawsl == 'Paperwork,Safe movement' |
+                     violation_rawsl == 'Paperwork,Safe movement,Seat belt' |
+                     violation_rawsl == 'Paperwork,Safe movement,Speeding' |
+                     violation_rawsl == 'Paperwork,Safe movement,Truck' |
+                     violation_rawsl == 'Paperwork,Seat belt' |
+                     violation_rawsl == 'Paperwork,Seat belt,Speeding' |
+                     violation_rawsl == 'Paperwork,Seat belt,Truck' |
+                     violation_rawsl == 'Paperwork,Speeding' |
+                     violation_rawsl == 'Paperwork,Speeding,Truck' |
+                     violation_rawsl == 'Paperwork,Truck' ] <- 'Paperwork'
+
+violation_rawsl[   violation_rawsl == 'Safe movement' |
+                     violation_rawsl == 'Safe movement,Seat belt' |
+                     violation_rawsl == 'Safe movement,Seat belt,Speeding' |
+                     violation_rawsl == 'Safe movement,Seat belt,Truck' |
+                     violation_rawsl == 'Safe movement,Speeding' |
+                     violation_rawsl == 'Safe movement,Speeding,Truck' |
+                     violation_rawsl == 'Safe movement,Truck' ] <- 'Safe movement'
+
+violation_rawsl[  violation_rawsl == 'Seat belt' |
+                    violation_rawsl == 'Seat belt,Speeding' |
+                    violation_rawsl == 'Seat belt,Speeding,Truck' |
+                    violation_rawsl == 'Seat belt,Truck'  ] <- 'Seat belt'
+
+violation_rawsl[   violation_rawsl == 'Speeding' |
+                     violation_rawsl == 'Speeding,Truck' ] <- 'Speeding'
+
+violation_rawsl[is.na(violation_rawsl)] <- "Not Captured"
+
+(as.data.frame(table(violation_rawsl)))
+```
+
+Next: I extract the year and stop hour from their corresponding variables (I believe this might yield better insights than their regular variables):
+
+```{r message = FALSE, warning = FALSE}
+stop_year <- year(stop.dataR3$stop_date)
+stop_hour <- as.numeric(format(as.POSIXct(stop.dataR3$stop_time, format ="%H:%M"),"%H"))
+```
+
+We then group all of the ages as follows:
+
+```{r message = FALSE, warning = FALSE}
+stop.dataR3$driver_age[is.na(stop.dataR3$driver_age)] <- 1
+
+age_group <- stop.dataR3$driver_age
+
+summary(age_group)
+
+age_group[age_group == 1 ] <- "ag_NA"
+age_group[age_group >= 15 & age_group <= 31] <- "ag_(15-31)"
+age_group[age_group >= 32 & age_group <= 46] <- "ag_(32_46)"
+age_group[age_group >= 47 & age_group <= 61] <- "ag_(47_61)"
+age_group[age_group >= 61 & age_group <= 76] <- "ag_(62_76)"
+age_group[age_group >= 77 & age_group <= 93] <- "ag_(77_93)"
+
+pander(as.data.frame(table(age_group)))
+```
+
+
+Last, we need to create a response variable for Regression and Classification purposes. We will use the *stop_outcome* variable as a basis:
+
+``` {r message = FALSE, warning = FALSE}
+sov <- as.data.frame(table(stop.dataR3$stop_outcome)/16537)
+names(sov) <- c("stop_outcome","percentage")
+pander(sov)
+```
+
+We can see that there is a traffic stop will generally end in a traffic citation. Using this insight, we can create the variable *is_citation*:
+
+``` {r message = FALSE, warning = FALSE}
+stop.dataR3$stop_outcome <- as.character(stop.dataR3$stop_outcome)
+stop.dataR3$stop_outcome[is.na(stop.dataR3$stop_outcome)] <- 'Not Captured'
+stop.dataR3$stop_outcome <- as.factor(stop.dataR3$stop_outcome)
+is_citation <- ifelse(stop.dataR3$stop_outcome == 'Citation', 1, 0)
+pander(as.data.frame(table(is_citation )))
+```
+
+**Bringing it all together**
+
+```{r message = FALSE, warning = FALSE}
+keep <- c("location_raw","driver_age","driver_gender","stop_outcome","out_of_state")
+
+stop.final <- data.frame(stop.dataR3[,keep], driver_age_captured, driver_gender_captured, 
+                         driver_violation_captured, is_arrested_captured, officer_rank_captured,
+                         officer_rank_stream, out_of_state_captured, stop_hour, stop_year, is_citation, violation_rawsl, age_group)
+
+glimpse(stop.final)
+```
+
+Ultimately, I excluded any information relating to driver race and left only the officer rank as the only piece of that end. Providing insights in regarding to race at this time without more information about overall population counts for drivers and officers in the respective locations could be construed as careless assumption.
+
+## Driver Demographics (based on sample Data Base)
+
+Let's address the elephant the in the room - How much missing data are we looking at per year:
+
+``` {r message = FALSE, warning = FALSE}
+yearfreq <- as.data.frame(table(stop.final$stop_year))
+names(yearfreq) <- c("years","Frequency")
+yearfreq
+yearagec <- as.data.frame(table(stop.final$stop_year,stop.final$driver_age_captured))
+names(yearagec) <- c("years","Agec Captured?","Frequency")
+yearagec
+yeargenderc <- as.data.frame(table(stop.final$stop_year, stop.final$driver_gender_captured))
+names(yeargenderc) <- c("years","Gender captured?","Frequency")
+yeargenderc
+yearviolc <- as.data.frame(table(stop.final$stop_year, stop.final$driver_violation_captured))
+names(yearviolc) <- c("years","Violation captured?","Frequency")
+yearviolc 
+yearofrc <- as.data.frame(table(stop.final$stop_year, stop.final$officer_rank_captured))
+names(yearofrc) <- c("years","Officer Rank Captured?","Frequency")
+yearofrc
+```
+
+From 2010 to 2014, The rate of missing data on average goes as follows:
+
+* 2010 - 13% 
+* 2011 - 11%
+* 2012 - 10%
+* 2013 - 7%
+* 2014 - 5%
+* 2015 - 48%
+* 2016 - 100%
+
+This is perhaps a consequence of the sample being selected at random. Any other forms of inference as to why there is missing data would be construed as irresponsible assumption on my part, however additional research is needed to determine the root cause as to why this is happening
+
+**Count of Traffic Stops over the Year**
+``` {r echo = FALSE, fig.align="center"}
+
+mynamestheme <- theme(plot.title = element_text(family = "Helvetica", face = "bold", size = (15)), 
+                      legend.title = element_text(colour = "steelblue",  face = "bold.italic", family = "Helvetica"), 
+                      legend.text = element_text(face = "italic", colour="steelblue4",family = "Helvetica"), 
+                      axis.title = element_text(family = "Helvetica", size = (10), colour = "steelblue4"),
+                      axis.text = element_text(family = "Courier", colour = "cornflowerblue", size = (10)))
+
+hist <- ggplot(stop.final, aes(x=as.numeric(stop.final$stop_year), y = ..count..)) + geom_histogram(binwidth = 1.5, colour = "white", aes(fill=..count..), size = 0.1) 
+
+hist + scale_fill_gradient("Count", low = "cornflowerblue", high = "steelblue4") + mynamestheme + labs(title = "Traffic Stops over the years", y = "Counts", x = "Year")
+
+pander(as.data.frame(table(stop.final$stop_year)))
+```
+
+
+``` {r echo = FALSE, message = FALSE, warning = FALSE, fig.align="center"}
+scp <- ggplot(stop.final, aes(x = as.numeric(stop.final$stop_hour), y =stop.final$driver_age, colour = driver_gender))
+scp + geom_point(alpha = 0.5, position = position_jitter() ) + mynamestheme + labs(title = "Traffic Stops - Driver ages with gender", y = "Driver's Age", x = "Hour")
+
+kable(xtabs(~stop.final$driver_gender + stop.final$stop_hour))
+```
+
+``` {r echo = FALSE, message = FALSE, warning = FALSE, fig.align="center"}
+scp <- ggplot(stop.final, aes(x = as.numeric(stop.final$stop_hour), y =stop.final$driver_age, colour = age_group))
+scp + geom_point(alpha = 0.5, position = position_jitter() ) + mynamestheme + labs(title = "Traffic Stops - Driver ages by age grouping", y = "Driver's Age", x = "Hour")
+
+kable(xtabs(~stop.final$driver_gender + stop.final$stop_hour))
+```
+
+Based on the sample size, we can infer the following conclusions:
+
+* Gender distribution was comprised as follows: 
+    + 50% were reported as Male drivers. 
+    + 26% were reported as Female drivers.
+    + The remaining 24% was not captured.
+* Age distribution was comprised as follows: 
+    + 31% of reported drivers were between the ages of 15 to 31.
+    + 24% of reported drivers were between the ages of 32 and 46.
+    + 16% of reported drivers were between the ages of 47 and 61.
+    + 4% of reported drivers were between the ages 62 and 76.
+    + 1% of reported drivers were between the ages of 77 and 93.
+    + The remaining 24% was not captured.
+
+```{r echo = FALSE, message= FALSE, warning=FALSE}
+tsh <- as.data.frame(table(stop.final$stop_hour))
+names(tsh) <- c("hours","Frequency")
+pander(tsh)     
+```
+    
+* Based on the hours reported:
+    + The highest frequency of traffic stops occurs between 8:00 AM to 10:00 AM and 2:00PM to 5:00 PM (inclusive of these hours), with each of these hours representing around 0.07% to 0.08% of the active stops per hour.
+    + The lowest frequency of traffic stops occurs between 2:00 AM to 5:00 AM at less than 0.01% per hour.
+  
+
+``` {r echo = FALSE, message = FALSE, warning = FALSE }
+scp <- ggplot(stop.final, aes(x = as.numeric(stop.final$stop_hour), y =stop.final$violation_rawsl, colour = stop.final$stop_outcome))
+scp + geom_point(alpha = 0.3, position = position_jitter() ) + mynamestheme + labs(title = "Traffic Stops - Reported Violations by the Hour", y = "Reported Violation", x = "Hour")
+
+
+xtabviol <- xtabs(~stop.final$violation_rawsl + stop.final$stop_outcome)/16537
+
+
+pander(xtabviol)
+```
+
+Looking at the violations to outcomes, we can infer the following:
+* Speeding appears as the most reported reason for traffic stops at 37%.
+* Citations appear as the most reported outcome at 73%.
+
+## Logistic Regression.
+
+Having created our outcome/response variable (is_citation) earlier during the data preparation phase, we are now ready to create the Logistic Regression model:
+
+``` {r warning = FALSE, message = FALSE}
+stop.final2 <- na.omit(stop.final)
+stop.lr <- glm(is_citation ~ stop_year + driver_age + violation_rawsl + driver_gender, data = stop.final2, family = "binomial")
+
+pander(summary(stop.lr))
+```
+
+**Important** _R will automatically discard any rows with NA values. As such, we have to infer that the this model and it's accuracy will only apply to any and all complete observations. I still went ahead and omitted the data myself and saved it into a new data frame._
+
+The following can be inferred for:
+
+* driver_age is significant at _p < 0.001_ - meaning that for every unit change in driver age, the log odds of the outcome will be a citation decreases by -0.013.
+* driver_genderM is significant at _p < 0.05_ - meaning that the log odds of that the outcome will be a citation increases by 0.14 if the reported driver gender is male.
+* stop_year is significant at _p < 0.05_ - meaning that for every unit change in stop_year, the log odds of the outcome will be a citation increases by 0.37.
+* The violations contribute also in a significant manner:
+    + violation_rawslLights, significant at _p < 0.05_, means that the log odss of getting a citation over other violations decreases by -1.07.
+    + violation_rawslEquipment, significant at _p < 0.05_, means that the log odss of getting a citation increases by 0.88 over the other type of violations.
+    * all other violation rankings, significant at _p < 0.001_, means that the log odss of a citation increases anywhere between 1.46 up to 3.96.
+
+To test for the overall effect of driver_violation, we can use the Wald Chi Square Test using _the wald.test_ from the *aod* library:
+
+``` {r warning = FALSE, message = FALSE}
+wald.test(b = coef(stop.lr), Sigma = vcov(stop.lr), Terms = 4:15)
+```
+
+With p < 0.05, we can ascertain that this model is a good fit for this sample data.
+
+Lastly, we test the accuracy of this model by using the area under the curve method:
+
+``` {r warning = FALSE, message = FALSE, fig.align="center"}
+stop_roc <-roc(stop.final2$is_citation, stop.lr$fitted.values)
+roc(stop.final2$is_citation, stop.lr$fitted.values, plot=TRUE, lwd = 4, print.auc =TRUE)
+auc(stop_roc)
+```
+
+AUC = 0.69
+
+```{r warning = FALSE, message = FALSE}
+pander(vif(stop.lr))
+pander(1/vif(stop.lr))
+```
+
+None of the VIF values exceed 10, meaning this model presents no apparent evidence of collinearity.
+
+## Machine Learning - Naive Bayes
+
+``` {r warning = FALSE, message = FALSE}
+
+stop.final2 <- na.omit(stop.final)
+keep3 <- c("stop_outcome","driver_age","stop_year", "driver_gender","violation_rawsl")
+stop.final3 <- stop.final2[,keep3]
+
+set.seed(123)
+stop.subset <- stop.final3[,1:5]
+stop.dat <- sample(1:nrow(stop.subset), size=nrow(stop.subset)*0.7, replace = FALSE)
+train.stop <- na.omit(stop.final3[stop.dat,])
+test.stop<- na.omit(stop.final3[-stop.dat,])
+stop_nb <- naiveBayes(as.factor(stop_outcome) ~ driver_age + driver_gender + stop_year  + as.factor(violation_rawsl), data = train.stop)
+stop_nb
+```
+
+
+The Naive Bayes model provides us a frequency-conditional probabilities table. Some items to point out:
+
+For the given data set/sample for given A-priori probability: 
+  + 73%  probability that a traffic stop will result in a citation while the probability of said stop ending in an felony arrest is 0.03%
+  + The mean for all age groups ranges between 32 to 40 with a standard deviation between 10 to 16 across all stop outcomes.
+  + Speeding presents the greatest probability of getting a citation at 36.67%. 
+
+
+``` {r warning = FALSE, message = FALSE}
+prestop <- predict(stop_nb, test.stop)
+confusionMatrix(table(prestop, test.stop$stop_outcome))
+```
+ 
+ Model Accuracy stands at 71.53 % with a 95% Confidence Interval between 70 to 73%.
+
+## Insights and Conclusions
+
+Analyzing the sample data has provided the following insights in regards to Traffic Stops reported in the State of Florida:
+
+* Out of 16,537 observations that were selected at random, 4,035 were incomplete (meaning that these observations contained a combination of NULL/NA Values). 
+* The trend of missing values is in the years 2015 and 2016, where the ration of NA/NULL values represents 50% to 100% of the totals for respective year.
+* From the sample data, we note the following key driver demographics and statistics:
+    + The number of reported male drivers was almost double than female drivers, while the remaining driver's gender was not reported.
+    + Drivers between the ages of 15 to 31 years of age represent 31% of all reported stops. 
+    + 73% of the stop outcomes within this sample ended with a citation, with Speeding cited as the primary violation type at 36%.
+* Created a Logistic Regression Model and Naive Bayes Classifier to help us understand the probabilities involved with Traffic Stop outcomes in the State of Florida based on the sample data.
+    
+**Conclusions and Next Steps - What could've been.**
+
+After getting to this point, I went back to the Step 1 and Step 2 documents of this final project to see if this final study is on track with what was previously established. Unsurprisingly, it is not. As I delved into this step, I reconsidered some of my research questions such as trying to gauge driver race demographics, police officer data and regional data. It does not mean these aspects of the data were worth pursuing, but rather more information would be needed to provided better context - Such as getting population data for the various counties in the state of Florida to gauge race demographics in the area as a contrast to the driver race data. The missing data is certainly a cause for concern, however it helps illustrate a good point that perhaps my data sample selection was perhaps not the best or rather as a true representation of the total data available, we need to do more research as to the root cause of this. 
+
+Does this research provide an answer the question that was asked at the very beginning of this document? - the same one that happened to crawl in my head as I watched someone else get a citation for speeding? At the very least, I have some context that will allow me to continue to further research the matter and see if I can get a more definitive answer that uses a more robust data set without so many null values. 
+
